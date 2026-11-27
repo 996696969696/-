@@ -1,0 +1,72 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "Sources/**"
+      - "Resources/**"
+      - "Tests/**"
+      - "project.yml"
+      - ".github/workflows/ios-unsigned.yml"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test JavaScript bridge
+        run: node --test Tests/JS/*.test.mjs
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build unsigned Release app
+        run: |
+          xcodebuild \
+            -project BMS.xcodeproj \
+            -scheme BMS \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/Build" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          test -d "$RUNNER_TEMP/Build/BMS.app"
+          test ! -e "$RUNNER_TEMP/Build/BMS.app/embedded.mobileprovision"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$RUNNER_TEMP/Build/BMS.app" "$RUNNER_TEMP/ipa/Payload/BMS.app"
+          ditto -c -k --keepParent "$RUNNER_TEMP/ipa/Payload" "$RUNNER_TEMP/BMS-unsigned.ipa"
+          python3 - <<'PY'
+          import os
+          import zipfile
+
+          path = os.path.join(os.environ["RUNNER_TEMP"], "BMS-unsigned.ipa")
+          with zipfile.ZipFile(path) as archive:
+              names = archive.namelist()
+              assert names, "IPA is empty"
+              assert all(name.split("/")[0] == "Payload" for name in names), "Unexpected IPA root entry"
+              assert any(name.startswith("Payload/BMS.app/") for name in names), "BMS.app is missing"
+              assert not any(name.endswith("embedded.mobileprovision") for name in names), "Provisioning profile found"
+          print("Unsigned IPA structure verified")
+          PY
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: BMS-unsigned-ipa
+          path: ${{ runner.temp }}/BMS-unsigned.ipa
+          if-no-files-found: error
